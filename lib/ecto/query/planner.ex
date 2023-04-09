@@ -1422,12 +1422,28 @@ defmodule Ecto.Query.Planner do
     {{:source, :from}, fields, {:ok, {:source, :from}, expr, taken}}
   end
 
+  defp collect_fields({:map, _, [{:&, _, [0]}]}, fields, :none, query, take, _keep_literals?, drop) do
+    {_, schema, _} = get_source!(:select, query, 0)
+    map_fields = schema.__schema__(:query_fields)
+    take = Ecto.Query.Builder.Select.add_take(take, 0, {:map, map_fields})
+    {expr, taken} = source_take!(:select, query, take, 0, 0, drop)
+    {{:source, :from}, fields, {:ok, {:source, :from}, expr, taken}}
+  end
+
   defp collect_fields({:&, _, [0]}, fields, from, _query, _take, _keep_literals?, _drop)
        when from != :never do
     {{:source, :from}, fields, from}
   end
 
   defp collect_fields({:&, _, [ix]}, fields, from, query, take, _keep_literals?, drop) do
+    {expr, taken} = source_take!(:select, query, take, ix, ix, drop)
+    {expr, Enum.reverse(taken, fields), from}
+  end
+
+  defp collect_fields({:map, _, [{:&, _, [ix]}]}, fields, from, query, take, _keep_literals?, drop) do
+    {_, schema, _} = get_source!(:select, query, ix)
+    map_fields = schema.__schema__(:query_fields)
+    take = Ecto.Query.Builder.Select.add_take(take, ix, {:map, map_fields})
     {expr, taken} = source_take!(:select, query, take, ix, ix, drop)
     {expr, Enum.reverse(taken, fields), from}
   end

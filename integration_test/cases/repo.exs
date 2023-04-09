@@ -14,6 +14,37 @@ defmodule Ecto.Integration.RepoTest do
   alias Ecto.Integration.CompositePk
   alias Ecto.Integration.PostUserCompositePk
 
+  @tag :map_1
+  test "map/1 test 1" do
+    p = TestRepo.insert!(%Post{})
+    TestRepo.insert!(%Comment{post_id: p.id})
+    q1 = from p in Post, join: c in Comment, select: map(p, [:id]), preload: [:comments]
+    q2 = from p in Post, join: c in Comment, select: map(p), preload: [:comments]
+
+    # works
+    IO.inspect TestRepo.all(q1)
+
+    # error in postprocessor because it relies on `from_tag` being `:map` in `normalize_select`
+    # `normalize_select` is a private function in the planner
+    IO.inspect TestRepo.all(q2)
+  end
+
+  @tag :map_1
+  test "map/1 test 2" do
+    p = TestRepo.insert!(%Post{})
+    TestRepo.insert!(%Comment{post_id: p.id})
+    q1 = from p in Post, join: c in Comment, on: true, select: map(p, [:title]), select_merge: map(p, [:id]), preload: [:comments]
+    q2 = from p in Post, join: c in Comment, on: true, select: map(p), select_merge: map(p, [:id]), preload: [:comments]
+
+    # works
+    IO.inspect TestRepo.all(q1)
+
+    # errors when merging because `normalize_select` temporarily tags `map/2` as a struct while preloading. this causes
+    # the merge in `collect_fields` to fail because a struct is merging with a map
+    # `normalize_select` is a private function in the planner
+    IO.inspect TestRepo.all(q2)
+  end
+
   test "returns already started for started repos" do
     assert {:error, {:already_started, _}} = TestRepo.start_link()
   end

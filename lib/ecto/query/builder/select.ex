@@ -362,9 +362,6 @@ defmodule Ecto.Query.Builder.Select do
   defp merge(query, select, old_expr, old_params, old_subqueries, old_take, old_aliases, new_select) do
     %{expr: new_expr, params: new_params, subqueries: new_subqueries, take: new_take, aliases: new_aliases} = new_select
 
-    {old_expr, old_take} = expand_map!(query, old_expr, old_take)
-    {new_expr, new_take} = expand_map!(query, new_expr, new_take)
-
     new_expr =
       new_expr
       |> Ecto.Query.Builder.bump_interpolations(old_params)
@@ -436,24 +433,12 @@ defmodule Ecto.Query.Builder.Select do
     %{query | select: select}
   end
 
-  defp expand_map!(query, {:map, _, [{:&, _, [ix]} = amp]}, take) do
-    take =
-      case get_source(query, ix) do
-        {_, schema} when schema != nil ->
-          fields = schema.__schema__(:query_fields)
-          add_take(take, ix, {:map, fields})
-
-        _ ->
-          raise "map/1 requires a source with a schema"
-      end
-
-    {amp, take}
-  end
-
-  defp expand_map!(_, expr, take), do: {expr, take}
-
   defp get_source(query, ix) do
     Enum.at([query.from | query.joins], ix).source
+  end
+
+  defp classify_merge({:map, meta, [{:&, _, [_]}]}, _take) do
+    {:map, meta, :runtime}
   end
 
   defp classify_merge({:&, meta, [ix]}, take) when is_integer(ix) do
