@@ -3,7 +3,6 @@ defmodule Ecto.Query.Planner do
   @moduledoc false
 
   alias Ecto.Query.{BooleanExpr, DynamicExpr, FromExpr, JoinExpr, QueryExpr, SelectExpr, LimitExpr}
-  alias Ecto.Query.Builder.Select
 
   if map_size(%Ecto.Query{}) != 21 do
     raise "Ecto.Query match out of date in builder"
@@ -307,7 +306,7 @@ defmodule Ecto.Query.Planner do
 
   defp normalize_subquery_select(query, adapter, source?) do
     {schema_or_source, expr, %{select: select} = query} = rewrite_subquery_select_expr(query, source?)
-    {expr, _, _} = prewalk(expr, :select, query, select, 0, adapter)
+    {expr, _} = prewalk(expr, :select, query, select, 0, adapter)
     {{:map, types}, fields, _from} = collect_fields(expr, [], :never, query, select.take, true, %{})
     # types must take into account selected_as/2 aliases so that the correct fields are
     # referenced when the outer query selects the entire subquery
@@ -400,13 +399,6 @@ defmodule Ecto.Query.Planner do
     {nil, pairs}
   end
   defp subquery_select({:&, _, [ix]}, take, query) do
-    {source, _} = source_take!(:select, query, take, ix, ix, %{})
-    fields = subquery_source_fields(source)
-    {keep_source_or_struct(source), subquery_fields(fields, ix)}
-  end
-  defp subquery_select({:map, _, [{:&, _, [ix]}]}, take, query) do
-    fields = map_fields!(:select, query, ix)
-    take = Select.add_take(take, ix, {:map, fields})
     {source, _} = source_take!(:select, query, take, ix, ix, %{})
     fields = subquery_source_fields(source)
     {keep_source_or_struct(source), subquery_fields(fields, ix)}
@@ -1145,9 +1137,9 @@ defmodule Ecto.Query.Planner do
     :ok
   end
 
-  defp prewalk_source({:fragment, meta, fragments}, kind, query, expr, counter, adapter) do
-    {fragments, _expr, counter} = prewalk(fragments, kind, query, expr, counter, adapter)
-    {{:fragment, meta, fragments}, counter}
+  defp prewalk_source({:fragment, meta, fragments}, kind, query, expr, acc, adapter) do
+    {fragments, acc} = prewalk(fragments, kind, query, expr, acc, adapter)
+    {{:fragment, meta, fragments}, acc}
   end
   defp prewalk_source(%Ecto.SubQuery{query: inner_query} = subquery, kind, query, _expr, counter, adapter) do
     try do
@@ -1179,55 +1171,54 @@ defmodule Ecto.Query.Planner do
       e -> raise Ecto.SubQueryError, query: query, exception: e
     end
   end
-  defp prewalk_source(source, _kind, _query, _expr, counter, _adapter) do
-    {source, counter}
+  defp prewalk_source(source, _kind, _query, _expr, acc, _adapter) do
+    {source, acc}
   end
 
   defp prewalk(:update, query, expr, counter, adapter) do
     source = get_source!(:update, query, 0)
 
-    {inner, {expr, counter}} =
-      Enum.map_reduce expr.expr, {expr, counter}, fn {op, kw}, {expr, counter} ->
+    {inner, acc} =
+      Enum.map_reduce expr.expr, counter, fn {op, kw}, counter ->
         {kw, acc} =
-          Enum.map_reduce kw, {expr, counter}, fn {field, value}, {expr, counter} ->
-            {value, expr, counter} = prewalk(value, :update, query, expr, counter, adapter)
-            {{field_source(source, field), value}, {expr, counter}}
+          Enum.map_reduce kw, counter, fn {field, value}, counter ->
+            {value, acc} = prewalk(value, :update, query, expr, counter, adapter)
+            {{field_source(source, field), value}, acc}
           end
         {{op, kw}, acc}
       end
 
-    {%{expr | expr: inner, params: nil}, counter}
+    {%{expr | expr: inner, params: nil}, acc}
   end
   defp prewalk(kind, query, expr, counter, adapter) do
-    {inner, expr, counter} = prewalk(expr.expr, kind, query, expr, counter, adapter)
-    {%{expr | expr: inner, params: nil}, counter}
+    {inner, acc} = prewalk(expr.expr, kind, query, expr, counter, adapter)
+    {%{expr | expr: inner, params: nil}, acc}
   end
 
-  defp prewalk({:subquery, i}, kind, query, expr, counter, adapter) do
-    {source, counter} = prewalk_source(Enum.fetch!(expr.subqueries, i), kind, query, expr, counter, adapter)
-    {source, expr, counter}
+  defp prewalk({:subquery, i}, kind, query, expr, acc, adapter) do
+    prewalk_source(Enum.fetch!(expr.subqueries, i), kind, query, expr, acc, adapter)
   end
 
-  defp prewalk({:in, in_meta, [left, {:^, meta, [param]}]}, kind, query, expr, counter, adapter) do
-    {left, expr, counter} = prewalk(left, kind, query, expr, counter, adapter)
-    {right, counter} = validate_in(meta, expr, param, counter, adapter)
-    {{:in, in_meta, [left, right]}, expr, counter}
+  defp prewalk({:in, in_meta, [left, {:^, meta, [param]}]}, kind, query, expr, acc, adapter) do
+    {left, acc} = prewalk(left, kind, query, expr, acc, adapter)
+    {right, acc} = validate_in(meta, expr, param, acc, adapter)
+    {{:in, in_meta, [left, right]}, acc}
   end
 
-  defp prewalk({:in, in_meta, [left, {:subquery, _} = right]}, kind, query, expr, counter, adapter) do
-    {left, expr, counter} = prewalk(left, kind, query, expr, counter, adapter)
-    {right, expr, counter} = prewalk(right, kind, query, expr, counter, adapter)
+  defp prewalk({:in, in_meta, [left, {:subquery, _} = right]}, kind, query, expr, acc, adapter) do
+    {left, acc} = prewalk(left, kind, query, expr, acc, adapter)
+    {right, acc} = prewalk(right, kind, query, expr, acc, adapter)
 
     case right.query.select.fields do
       [_] -> :ok
       _ -> error!(query, "subquery must return a single field in order to be used on the right-side of `in`")
     end
 
-    {{:in, in_meta, [left, right]}, expr, counter}
+    {{:in, in_meta, [left, right]}, acc}
   end
 
-  defp prewalk({quantifier, meta, [{:subquery, _} = subquery]}, kind, query, expr, counter, adapter) when quantifier in [:exists, :any, :all] do
-    {subquery, expr, counter} = prewalk(subquery, kind, query, expr, counter, adapter)
+  defp prewalk({quantifier, meta, [{:subquery, _} = subquery]}, kind, query, expr, acc, adapter) when quantifier in [:exists, :any, :all] do
+    {subquery, acc} = prewalk(subquery, kind, query, expr, acc, adapter)
 
     case {quantifier, subquery.query.select.fields} do
       {:exists, _} ->
@@ -1243,28 +1234,28 @@ defmodule Ecto.Query.Planner do
         )
     end
 
-    {{quantifier, meta, [subquery]}, expr, counter}
+    {{quantifier, meta, [subquery]}, acc}
   end
 
   defp prewalk({{:., dot_meta, [left, field]}, meta, []},
-               kind, query, expr, counter, _adapter) do
+               kind, query, expr, acc, _adapter) do
     {ix, ix_expr, ix_query} = get_ix!(left, kind, query)
     extra = if kind == :select, do: [type: type!(kind, ix_query, expr, ix, field)], else: []
     field = field_source(get_source!(kind, ix_query, ix), field)
-    {{{:., extra ++ dot_meta, [ix_expr, field]}, meta, []}, expr, counter}
+    {{{:., extra ++ dot_meta, [ix_expr, field]}, meta, []}, acc}
   end
 
-  defp prewalk({:^, meta, [ix]}, _kind, _query, expr, counter, _adapter) when is_integer(ix) do
-    {{:^, meta, [counter]}, expr, counter + 1}
+  defp prewalk({:^, meta, [ix]}, _kind, _query, _expr, acc, _adapter) when is_integer(ix) do
+    {{:^, meta, [acc]}, acc + 1}
   end
 
-  defp prewalk({:type, _, [arg, type]}, kind, query, expr, counter, adapter) do
-    {arg, expr, counter} = prewalk(arg, kind, query, expr, counter, adapter)
+  defp prewalk({:type, _, [arg, type]}, kind, query, expr, acc, adapter) do
+    {arg, acc} = prewalk(arg, kind, query, expr, acc, adapter)
     type = field_type!(kind, query, expr, type, true)
-    {%Ecto.Query.Tagged{value: arg, tag: type, type: Ecto.Type.type(type)}, expr, counter}
+    {%Ecto.Query.Tagged{value: arg, tag: type, type: Ecto.Type.type(type)}, acc}
   end
 
-  defp prewalk({:json_extract_path, meta, [json_field, path]}, kind, query, expr, counter, _adapter) do
+  defp prewalk({:json_extract_path, meta, [json_field, path]}, kind, query, expr, acc, _adapter) do
     {{:., dot_meta, [{:&, amp_meta, [ix]}, field]}, expr_meta, []} = json_field
 
     type = type!(kind, query, expr, ix, field)
@@ -1273,69 +1264,40 @@ defmodule Ecto.Query.Planner do
     field_source = kind |> get_source!(query, ix) |> field_source(field)
 
     json_field = {{:., dot_meta, [{:&, amp_meta, [ix]}, field_source]}, expr_meta, []}
-    {{:json_extract_path, meta, [json_field, path]}, expr, counter}
+    {{:json_extract_path, meta, [json_field, path]}, acc}
   end
 
-  defp prewalk({:selected_as, [], [name]}, _kind, query, expr, counter, _adapter) do
+  defp prewalk({:selected_as, [], [name]}, _kind, query, _expr, acc, _adapter) do
     name = selected_as!(query.select.aliases, name)
-    {{:selected_as, [], [name]}, expr, counter}
+    {{:selected_as, [], [name]}, acc}
   end
 
-  defp prewalk({:map, _, [{:&, _, [ix]} = amp]}, kind, query, expr, counter, _adapter) do
-    fields = map_fields!(kind, query, ix)
-    new_take = Select.add_take(expr.take, ix, {:map, fields})
-    {amp, %{expr | take: new_take}, counter}
-  end
-
-  defp prewalk(%Ecto.Query.Tagged{value: v, type: type} = tagged, kind, query, expr, counter, adapter) do
+  defp prewalk(%Ecto.Query.Tagged{value: v, type: type} = tagged, kind, query, expr, acc, adapter) do
     if Ecto.Type.base?(type) do
-      {tagged, expr, counter}
+      {tagged, acc}
     else
-      {dump_param(kind, query, expr, v, type, adapter), expr, counter}
+      {dump_param(kind, query, expr, v, type, adapter), acc}
     end
   end
 
-  defp prewalk({left, right}, kind, query, expr, counter, adapter) do
-    {left, expr, counter} = prewalk(left, kind, query, expr, counter, adapter)
-    {right, expr, counter} = prewalk(right, kind, query, expr, counter, adapter)
-    {{left, right}, expr, counter}
+  defp prewalk({left, right}, kind, query, expr, acc, adapter) do
+    {left, acc} = prewalk(left, kind, query, expr, acc, adapter)
+    {right, acc} = prewalk(right, kind, query, expr, acc, adapter)
+    {{left, right}, acc}
   end
 
-  defp prewalk({left, meta, args}, kind, query, expr, counter, adapter) do
-    {left, expr, counter} = prewalk(left, kind, query, expr, counter, adapter)
-    {args, expr, counter} = prewalk(args, kind, query, expr, counter, adapter)
-    {{left, meta, args}, expr, counter}
+  defp prewalk({left, meta, args}, kind, query, expr, acc, adapter) do
+    {left, acc} = prewalk(left, kind, query, expr, acc, adapter)
+    {args, acc} = prewalk(args, kind, query, expr, acc, adapter)
+    {{left, meta, args}, acc}
   end
 
-  defp prewalk(list, kind, query, expr, counter, adapter) when is_list(list) do
-    {value, {expr, counter}} =
-      Enum.map_reduce(list, {expr, counter}, fn value, {expr, counter} ->
-        {value, expr, counter} = prewalk(value, kind, query, expr, counter, adapter)
-        {value, {expr, counter}}
-      end)
-
-    {value, expr, counter}
+  defp prewalk(list, kind, query, expr, acc, adapter) when is_list(list) do
+    Enum.map_reduce(list, acc, &prewalk(&1, kind, query, expr, &2, adapter))
   end
 
-  defp prewalk({{:., dot_meta, [left, field]}, meta, []},  kind, query, expr, counter, _adapter) do
-    {ix, ix_expr, ix_query} = get_ix!(left, kind, query)
-    extra = if kind == :select, do: [type: type!(kind, ix_query, expr, ix, field)], else: []
-    field = field_source(get_source!(kind, ix_query, ix), field)
-    {{{:., extra ++ dot_meta, [ix_expr, field]}, meta, []}, expr, counter}
-  end
-
-  defp prewalk(other, _kind, _query, expr, counter, _adapter) do
-    {other, expr, counter}
-  end
-
-  defp map_fields!(kind, query, ix) do
-    case get_source!(kind, query, ix) do
-      {source, schema, _} when is_binary(source) and schema != nil ->
-        schema.__schema__(:query_fields)
-
-      _ ->
-        error! query, "map/1 requires a source with a schema"
-    end
+  defp prewalk(other, _kind, _query, _expr, acc, _adapter) do
+    {other, acc}
   end
 
   defp selected_as!(select_aliases, name) do
@@ -1728,6 +1690,7 @@ defmodule Ecto.Query.Planner do
 
       {:error, {source, schema, prefix}} ->
         {types, fields} = select_dump(schema.__schema__(:query_fields), schema.__schema__(:dump), ix, drop)
+
         {{:source, {source, schema}, prefix || query.prefix, types}, fields}
 
       {:error, %Ecto.SubQuery{select: select}} ->
