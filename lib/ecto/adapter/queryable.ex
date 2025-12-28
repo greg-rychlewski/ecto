@@ -122,7 +122,7 @@ defmodule Ecto.Adapter.Queryable do
   """
   def plan_query(operation, adapter, queryable) do
     query = Ecto.Queryable.to_query(queryable)
-    {query, params, _key} = Ecto.Query.Planner.plan(query, operation, adapter)
+    {query, params, _key} = Ecto.Query.Planner.plan(query, operation, adapter, false)
     {cast_params, dump_params} = Enum.unzip(params)
     {query, _} = Ecto.Query.Planner.normalize(query, operation, adapter, 0)
     {query, cast_params, dump_params}

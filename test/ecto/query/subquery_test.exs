@@ -34,7 +34,7 @@ defmodule Ecto.Query.SubqueryTest do
   end
 
   defp plan(query, operation \\ :all) do
-    {query, params, key} = Planner.plan(query, operation, Ecto.TestAdapter)
+    {query, params, key} = Planner.plan(query, operation, Ecto.TestAdapter, true)
     {cast_params, dump_params} = Enum.unzip(params)
     {query, cast_params, dump_params, key}
   end

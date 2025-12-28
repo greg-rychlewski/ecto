@@ -134,9 +134,8 @@ defmodule Ecto.Query.Planner do
   along-side the select expression.
   """
   def query(query, operation, cache, adapter, counter, query_cache?) do
-    {query, params, key} = plan(query, operation, adapter)
+    {query, params, key} = plan(query, operation, adapter, query_cache?)
     {cast_params, dump_params} = Enum.unzip(params)
-    key = if query_cache?, do: key, else: :nocache
     query_with_cache(key, query, operation, cache, adapter, counter, cast_params, dump_params)
   end
 
@@ -218,16 +217,16 @@ defmodule Ecto.Query.Planner do
   This function is called by the backend before invoking
   any cache mechanism.
   """
-  @spec plan(Ecto.Query.t(), atom(), module, map()) ::
+  @spec plan(Ecto.Query.t(), atom(), module, boolean(), map()) ::
           {planned_query :: Ecto.Query.t(), parameters :: list(), cache_key :: any()}
-  def plan(query, operation, adapter, cte_names \\ %{}) do
-    {query, cte_names} = plan_ctes(query, adapter, cte_names)
-    query = plan_sources(query, adapter, cte_names)
-    plan_subquery = &plan_subquery(&1, query, nil, adapter, false, cte_names)
+  def plan(query, operation, adapter, query_cache?, cte_names \\ %{}) do
+    {query, cte_names} = plan_ctes(query, adapter, query_cache?, cte_names)
+    query = plan_sources(query, adapter, query_cache?, cte_names)
+    plan_subquery = &plan_subquery(&1, query, nil, adapter, false, query_cache?, cte_names)
 
     query
     |> plan_assocs()
-    |> plan_combinations(adapter, cte_names)
+    |> plan_combinations(adapter, query_cache?, cte_names)
     |> plan_expr_subqueries(:wheres, plan_subquery)
     |> plan_expr_subqueries(:havings, plan_subquery)
     |> plan_expr_subqueries(:order_bys, plan_subquery)
@@ -235,7 +234,7 @@ defmodule Ecto.Query.Planner do
     |> plan_expr_subquery(:distinct, plan_subquery)
     |> plan_expr_subquery(:select, plan_subquery)
     |> plan_windows(plan_subquery)
-    |> plan_cache(operation, adapter)
+    |> plan_cache(operation, adapter, query_cache?)
   rescue
     e ->
       # Reraise errors so we ignore the planner inner stacktrace
@@ -245,15 +244,15 @@ defmodule Ecto.Query.Planner do
   @doc """
   Prepare all sources, by traversing and expanding from, joins, subqueries.
   """
-  def plan_sources(query, adapter, cte_names) do
-    {from, source} = plan_from(query, adapter, cte_names)
+  def plan_sources(query, adapter, query_cache?, cte_names) do
+    {from, source} = plan_from(query, adapter, query_cache?, cte_names)
 
     # Set up the initial source so we can refer
     # to the parent in subqueries in joins
     query = %{query | sources: {source}}
 
     {joins, sources, tail_sources} =
-      plan_joins(query, [source], length(query.joins), adapter, cte_names)
+      plan_joins(query, [source], length(query.joins), adapter, query_cache?, cte_names)
 
     %{
       query
@@ -263,34 +262,36 @@ defmodule Ecto.Query.Planner do
     }
   end
 
-  defp plan_from(%{from: nil} = query, _adapter, _cte_names) do
+  defp plan_from(%{from: nil} = query, _adapter, _query_cache?, _cte_names) do
     error!(query, "query must have a from expression")
   end
 
   defp plan_from(
          %{from: %{source: {kind, _, _}}, preloads: preloads, assocs: assocs} = query,
          _adapter,
+         _query_cache?,
          _cte_names
        )
        when kind in [:fragment, :values] and (assocs != [] or preloads != []) do
     error!(query, "cannot preload associations with a #{kind} source")
   end
 
-  defp plan_from(%{from: from} = query, adapter, cte_names) do
-    plan_source(query, from, adapter, cte_names)
+  defp plan_from(%{from: from} = query, adapter, query_cache?, cte_names) do
+    plan_source(query, from, adapter, query_cache?, cte_names)
   end
 
   defp plan_source(
          query,
          %{source: %Ecto.SubQuery{} = subquery, prefix: prefix} = expr,
          adapter,
+         query_cache?,
          cte_names
        ) do
-    subquery = plan_subquery(subquery, query, prefix, adapter, true, cte_names)
+    subquery = plan_subquery(subquery, query, prefix, adapter, true, query_cache?, cte_names)
     {%{expr | source: subquery}, subquery}
   end
 
-  defp plan_source(query, %{source: {nil, schema}} = expr, _adapter, cte_names)
+  defp plan_source(query, %{source: {nil, schema}} = expr, _adapter, _query_cache?, cte_names)
        when is_atom(schema) and schema != nil do
     source = schema.__schema__(:source)
     source_prefix = plan_source_schema_prefix(expr, schema)
@@ -304,7 +305,7 @@ defmodule Ecto.Query.Planner do
     {%{expr | source: {source, schema}}, {source, schema, prefix}}
   end
 
-  defp plan_source(query, %{source: {source, schema}, prefix: prefix} = expr, _adapter, cte_names)
+  defp plan_source(query, %{source: {source, schema}, prefix: prefix} = expr, _adapter, _query_cache?, cte_names)
        when is_binary(source) and is_atom(schema) do
     prefix =
       case cte_names do
@@ -319,24 +320,25 @@ defmodule Ecto.Query.Planner do
          _query,
          %{source: {kind, _, _} = source, prefix: nil} = expr,
          _adapter,
+         _query_cache?,
          _cte_names
        )
        when kind in [:fragment, :values],
        do: {expr, source}
 
-  defp plan_source(_query, %{source: {{:fragment, _, _} = source, schema}, prefix: nil} = expr, _adapter, _cte_names)
+  defp plan_source(_query, %{source: {{:fragment, _, _} = source, schema}, prefix: nil} = expr, _adapter, _query_cache?, _cte_names)
        when is_atom(schema) do
     {expr, {source, schema, nil}}
   end
 
-  defp plan_source(query, %{source: {kind, _, _}, prefix: prefix} = expr, _adapter, _cte_names)
+  defp plan_source(query, %{source: {kind, _, _}, prefix: prefix} = expr, _adapter, _query_cache?, _cte_names)
        when kind in [:fragment, :values],
        do: error!(query, expr, "cannot set prefix: #{inspect(prefix)} option for #{kind} sources")
 
-  defp plan_source(query, %{source: {{:fragment, _, _}, _schema}, prefix: prefix} = expr, _adapter, _cte_names),
+  defp plan_source(query, %{source: {{:fragment, _, _}, _schema}, prefix: prefix} = expr, _adapter, _query_cache?, _cte_names),
        do: error!(query, expr, "cannot set prefix: #{inspect(prefix)} option for fragment sources")
 
-  defp plan_subquery(subquery, query, prefix, adapter, source?, cte_names) do
+  defp plan_subquery(subquery, query, prefix, adapter, source?, query_cache?, cte_names) do
     %{query: inner_query} = subquery
 
     inner_query = %{
@@ -345,7 +347,7 @@ defmodule Ecto.Query.Planner do
         aliases: Map.put(inner_query.aliases, @parent_as, query)
     }
 
-    {inner_query, params, key} = plan(inner_query, :all, adapter, cte_names)
+    {inner_query, params, key} = plan(inner_query, :all, adapter, query_cache?, cte_names)
     assert_no_subquery_assocs!(inner_query)
 
     {inner_query, select} =
@@ -569,8 +571,8 @@ defmodule Ecto.Query.Planner do
   defp valid_subquery_value?(arg) when is_atom(arg), do: is_boolean(arg)
   defp valid_subquery_value?(_), do: true
 
-  defp plan_joins(query, sources, offset, adapter, cte_names) do
-    plan_joins(query.joins, query, [], sources, [], 1, offset, adapter, cte_names)
+  defp plan_joins(query, sources, offset, adapter, query_cache?, cte_names) do
+    plan_joins(query.joins, query, [], sources, [], 1, offset, adapter, query_cache?, cte_names)
   end
 
   defp plan_joins(
@@ -582,6 +584,7 @@ defmodule Ecto.Query.Planner do
          counter,
          offset,
          adapter,
+         query_cache?,
          cte_names
        ) do
     source = fetch_source!(sources, ix)
@@ -623,10 +626,10 @@ defmodule Ecto.Query.Planner do
     last_ix = length(child.joins)
     source_ix = counter
 
-    {_, child_from_source} = plan_source(child, child.from, adapter, cte_names)
+    {_, child_from_source} = plan_source(child, child.from, adapter, query_cache?, cte_names)
 
     {child_joins, child_sources, child_tail} =
-      plan_joins(child, [child_from_source], offset + last_ix - 1, adapter, cte_names)
+      plan_joins(child, [child_from_source], offset + last_ix - 1, adapter, query_cache?, cte_names)
 
     # Rewrite joins indexes as mentioned above
     child_joins = Enum.map(child_joins, &rewrite_join(&1, qual, ix, last_ix, source_ix, offset))
@@ -646,6 +649,7 @@ defmodule Ecto.Query.Planner do
       counter + 1,
       offset + length(child_sources),
       adapter,
+      query_cache?,
       cte_names
     )
   end
@@ -663,6 +667,7 @@ defmodule Ecto.Query.Planner do
          counter,
          offset,
          adapter,
+         query_cache?,
          cte_names
        ) do
     case join_query do
@@ -680,7 +685,7 @@ defmodule Ecto.Query.Planner do
       } ->
         join_query = rewrite_prefix(join_query, query.prefix)
         from = rewrite_prefix(join_query.from, prefix)
-        {from, source} = plan_source(join_query, from, adapter, cte_names)
+        {from, source} = plan_source(join_query, from, adapter, query_cache?, cte_names)
         [join] = attach_on(query_to_joins(qual, from.source, join_query, counter), on)
 
         plan_joins(
@@ -692,6 +697,7 @@ defmodule Ecto.Query.Planner do
           counter + 1,
           offset,
           adapter,
+          query_cache?,
           cte_names
         )
 
@@ -715,9 +721,10 @@ defmodule Ecto.Query.Planner do
          counter,
          offset,
          adapter,
+         query_cache?,
          cte_names
        ) do
-    {join, source} = plan_source(query, %{join | ix: counter}, adapter, cte_names)
+    {join, source} = plan_source(query, %{join | ix: counter}, adapter, query_cache?, cte_names)
 
     plan_joins(
       t,
@@ -728,6 +735,7 @@ defmodule Ecto.Query.Planner do
       counter + 1,
       offset,
       adapter,
+      query_cache?,
       cte_names
     )
   end
@@ -741,6 +749,7 @@ defmodule Ecto.Query.Planner do
          _counter,
          _offset,
          _adapter,
+         _query_cache?,
          _cte_names
        ) do
     {joins, sources, tail_sources}
@@ -903,37 +912,38 @@ defmodule Ecto.Query.Planner do
   @doc """
   Prepare the parameters by merging and casting them according to sources.
   """
-  def plan_cache(query, operation, adapter) do
-    {query, params, cache} = traverse_cache(query, operation, {[], []}, adapter)
+  def plan_cache(query, operation, adapter, query_cache?) do
+    {query, params, cache} = traverse_cache(query, operation, {[], []}, adapter, query_cache?)
     {query, Enum.reverse(params), cache}
   end
 
-  defp traverse_cache(query, operation, cache_params, adapter) do
-    fun = &{&3, merge_cache(&1, &2, &3, &4, operation, adapter)}
+  defp traverse_cache(query, operation, cache_params, adapter, query_cache?) do
+    fun = &{&3, merge_cache(&1, &2, &3, &4, operation, adapter, query_cache?)}
     {query, {cache, params}} = traverse_exprs(query, operation, cache_params, fun)
     {query, params, finalize_cache(query, operation, cache)}
   end
 
-  defp merge_cache(:from, query, from, {cache, params}, _operation, adapter) do
+  defp merge_cache(:from, query, from, {cache, params}, _operation, adapter, query_cache?) do
     {key, params} = source_cache(from, params)
     {params, source_cacheable?} = cast_and_merge_params(:from, query, from, params, adapter)
-    {merge_cache({:from, key, from.hints}, cache, source_cacheable? and key != :nocache), params}
+    cacheable? = query_cache? and key != :nocache and source_cacheable?
+    {merge_cache({:from, key, from.hints}, cache, cacheable?), params}
   end
 
-  defp merge_cache(kind, query, expr, {cache, params}, _operation, adapter)
+  defp merge_cache(kind, query, expr, {cache, params}, _operation, adapter, query_cache?)
        when kind in ~w(select distinct limit offset)a do
     if expr do
       {params, cacheable?} = cast_and_merge_params(kind, query, expr, params, adapter)
-      {merge_cache({kind, expr_to_cache(expr)}, cache, cacheable?), params}
+      {merge_cache({kind, expr_to_cache(expr)}, cache, query_cache? and cacheable?), params}
     else
       {cache, params}
     end
   end
 
-  defp merge_cache(kind, query, exprs, {cache, params}, _operation, adapter)
+  defp merge_cache(kind, query, exprs, {cache, params}, _operation, adapter, query_cache?)
        when kind in ~w(where update group_by having order_by)a do
     {expr_cache, {params, cacheable?}} =
-      Enum.map_reduce(exprs, {params, true}, fn expr, {params, cacheable?} ->
+      Enum.map_reduce(exprs, {params, query_cache?}, fn expr, {params, cacheable?} ->
         {params, current_cacheable?} = cast_and_merge_params(kind, query, expr, params, adapter)
         {expr_to_cache(expr), {params, cacheable? and current_cacheable?}}
       end)
@@ -944,9 +954,9 @@ defmodule Ecto.Query.Planner do
     end
   end
 
-  defp merge_cache(:join, query, exprs, {cache, params}, _operation, adapter) do
+  defp merge_cache(:join, query, exprs, {cache, params}, _operation, adapter, query_cache?) do
     {expr_cache, {params, cacheable?}} =
-      Enum.map_reduce(exprs, {params, true}, fn
+      Enum.map_reduce(exprs, {params, query_cache?}, fn
         %JoinExpr{on: on, qual: qual, hints: hints} = join, {params, cacheable?} ->
           {key, params} = source_cache(join, params)
           {params, join_cacheable?} = cast_and_merge_params(:join, query, join, params, adapter)
@@ -962,9 +972,9 @@ defmodule Ecto.Query.Planner do
     end
   end
 
-  defp merge_cache(:windows, query, exprs, {cache, params}, _operation, adapter) do
+  defp merge_cache(:windows, query, exprs, {cache, params}, _operation, adapter, query_cache?) do
     {expr_cache, {params, cacheable?}} =
-      Enum.map_reduce(exprs, {params, true}, fn {key, expr}, {params, cacheable?} ->
+      Enum.map_reduce(exprs, {params, query_cache?}, fn {key, expr}, {params, cacheable?} ->
         {params, current_cacheable?} =
           cast_and_merge_params(:windows, query, expr, params, adapter)
 
@@ -977,20 +987,20 @@ defmodule Ecto.Query.Planner do
     end
   end
 
-  defp merge_cache(:combination, _query, combinations, cache_and_params, operation, adapter) do
+  defp merge_cache(:combination, _query, combinations, cache_and_params, operation, adapter, query_cache?) do
     # In here we add each combination as its own entry in the cache key.
     # We could group them to avoid multiple keys, but since they are uncommon, we keep it simple.
     Enum.reduce(combinations, cache_and_params, fn {modifier, query}, {cache, params} ->
-      {_, params, inner_cache} = traverse_cache(query, operation, {[], params}, adapter)
+      {_, params, inner_cache} = traverse_cache(query, operation, {[], params}, adapter, query_cache?)
       {merge_cache({modifier, inner_cache}, cache, inner_cache != :nocache), params}
     end)
   end
 
-  defp merge_cache(:with_cte, _query, nil, cache_and_params, _operation, _adapter) do
+  defp merge_cache(:with_cte, _query, nil, cache_and_params, _operation, _adapter, _query_cache?) do
     cache_and_params
   end
 
-  defp merge_cache(:with_cte, query, with_expr, cache_and_params, _operation, adapter) do
+  defp merge_cache(:with_cte, query, with_expr, cache_and_params, _operation, adapter, query_cache?) do
     %{queries: queries, recursive: recursive} = with_expr
     key = if recursive, do: :recursive_cte, else: :non_recursive_cte
 
@@ -998,7 +1008,7 @@ defmodule Ecto.Query.Planner do
     # We could group them to avoid multiple keys, but since they are uncommon, we keep it simple.
     Enum.reduce(queries, cache_and_params, fn
       {name, opts, %Ecto.Query{} = query}, {cache, params} ->
-        {_, params, inner_cache} = traverse_cache(query, :all, {[], params}, adapter)
+        {_, params, inner_cache} = traverse_cache(query, :all, {[], params}, adapter, query_cache?)
 
         {merge_cache(
            {key, name, opts[:materialized], opts[:operation], inner_cache},
@@ -1013,7 +1023,7 @@ defmodule Ecto.Query.Planner do
         {merge_cache(
            {key, name, opts[:materialized], opts[:operation], expr_to_cache(query_expr)},
            cache,
-           cacheable?
+           query_cache? and cacheable?
          ), params}
     end)
   end
@@ -1213,11 +1223,11 @@ defmodule Ecto.Query.Planner do
     end)
   end
 
-  defp plan_combinations(query, adapter, cte_names) do
+  defp plan_combinations(query, adapter, query_cache?, cte_names) do
     combinations =
       Enum.map(query.combinations, fn {type, combination_query} ->
         {prepared_query, _params, _key} =
-          combination_query |> attach_prefix(query) |> plan(:all, adapter, cte_names)
+          combination_query |> attach_prefix(query) |> plan(:all, adapter, query_cache?, cte_names)
 
         prepared_query = prepared_query |> ensure_select(true)
         {type, prepared_query}
@@ -1226,16 +1236,17 @@ defmodule Ecto.Query.Planner do
     %{query | combinations: combinations}
   end
 
-  defp plan_ctes(%Ecto.Query{with_ctes: nil} = query, _adapter, cte_names), do: {query, cte_names}
+  defp plan_ctes(%Ecto.Query{with_ctes: nil} = query, _adapter, _query_cache?, cte_names),
+    do: {query, cte_names}
 
-  defp plan_ctes(%Ecto.Query{with_ctes: %{queries: queries}} = query, adapter, cte_names) do
+  defp plan_ctes(%Ecto.Query{with_ctes: %{queries: queries}} = query, adapter, query_cache?, cte_names) do
     {queries, cte_names} =
       Enum.map_reduce(queries, cte_names, fn
         {name, opts, %Ecto.Query{} = cte_query}, cte_names ->
           cte_names = Map.put(cte_names, name, [])
 
           {planned_query, _params, _key} =
-            cte_query |> attach_prefix(query) |> plan(:all, adapter, cte_names)
+            cte_query |> attach_prefix(query) |> plan(:all, adapter, query_cache?, cte_names)
 
           planned_query = planned_query |> ensure_select(true)
           {{name, opts, planned_query}, cte_names}

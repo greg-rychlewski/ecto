@@ -153,7 +153,7 @@ defmodule Ecto.Query.PlannerTest do
   end
 
   defp plan(query, operation \\ :all) do
-    {query, params, key} = Planner.plan(query, operation, Ecto.TestAdapter)
+    {query, params, key} = Planner.plan(query, operation, Ecto.TestAdapter, true)
     {cast_params, dump_params} = Enum.unzip(params)
     {query, cast_params, dump_params, key}
   end
@@ -616,7 +616,7 @@ defmodule Ecto.Query.PlannerTest do
 
   test "plan: generates a cache key for in based on the adapter" do
     query = from(p in Post, where: p.id in ^[1, 2, 3])
-    {_query, _params, key} = Planner.plan(query, :all, Ecto.TestAdapter)
+    {_query, _params, key} = Planner.plan(query, :all, Ecto.TestAdapter, true)
     assert key == :nocache
   end
 
@@ -632,13 +632,13 @@ defmodule Ecto.Query.PlannerTest do
       |> select([p], p.id)
       |> distinct(true)
 
-    {_, _, key} = query1 |> union_all(^query2) |> Planner.plan(:all, Ecto.TestAdapter)
+    {_, _, key} = query1 |> union_all(^query2) |> Planner.plan(:all, Ecto.TestAdapter, true)
     assert key == :nocache
   end
 
   test "plan: values lists are uncacheable" do
     query = from(v in values([%{id: 1}], %{id: :integer}))
-    {_query, _params, key} = Planner.plan(query, :all, Ecto.TestAdapter)
+    {_query, _params, key} = Planner.plan(query, :all, Ecto.TestAdapter, true)
     assert key == :nocache
   end
 

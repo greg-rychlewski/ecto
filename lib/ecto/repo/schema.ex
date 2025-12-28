@@ -311,7 +311,7 @@ defmodule Ecto.Repo.Schema do
                                                                    {cast_param_acc, counter} ->
           case :lists.keyfind(key, 1, fields) do
             {^key, %Ecto.Query{} = query} ->
-              {query, params, _} = Ecto.Query.Planner.plan(query, :all, adapter)
+              {query, params, _} = Ecto.Query.Planner.plan(query, :all, adapter, false)
               {cast_params, dump_params} = Enum.unzip(params)
               {query, _} = Ecto.Query.Planner.normalize(query, :all, adapter, counter)
               num_params = length(dump_params)
@@ -976,7 +976,7 @@ defmodule Ecto.Repo.Schema do
 
   defp on_conflict_query(query, from, prefix, counter_fun, adapter, conflict_target) do
     {query, params, _} =
-      Ecto.Query.Planner.plan(%{query | prefix: prefix}, :update_all, adapter)
+      Ecto.Query.Planner.plan(%{query | prefix: prefix}, :update_all, adapter, false)
 
     {cast_params, dump_params} = Enum.unzip(params)
 

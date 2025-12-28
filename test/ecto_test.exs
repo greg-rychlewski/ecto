@@ -96,7 +96,7 @@ defmodule EctoTest do
   end
 
   defp plan(query, operation) do
-    Planner.plan(query, operation, Ecto.TestAdapter)
+    Planner.plan(query, operation, Ecto.TestAdapter, true)
   end
 
   defp normalize(query, operation \\ :all) do
